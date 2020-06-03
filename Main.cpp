@@ -11,6 +11,7 @@ typedef struct st_SESSION
 	SOCKADDR_IN clientaddr;
 	int ID;
 	WCHAR NickName[dfNICK_MAX_LEN];
+	int RoomID;
 	CRingBuffer RecvQ;
 	CRingBuffer SendQ;
 } SESSION;
@@ -62,17 +63,31 @@ bool PacketProc(SESSION* session, WORD dwType, CMessage* message);
 // 클라이언트의 요청
 bool NetWork_ReqLogin(SESSION* session, CMessage* message);
 bool NetWork_ReqRoomList(SESSION* session, CMessage* message);
+bool NetWork_ReqRoomCreate(SESSION* session, CMessage* message);
+bool NetWork_ReqRoomEnter(SESSION* session, CMessage* message);
+bool NetWork_ReqChatting(SESSION* session, CMessage* message);
 
 // 서버의 응답
 void NetWork_ResLogin(SESSION* session, BYTE byResult);
 void NetWork_ResRoomList(SESSION* session);
+void NetWork_ResRoomCreate(SESSION* session, BYTE result, ROOM* room = nullptr);
+void NetWork_ResRoomEnter(SESSION* session, BYTE result, ROOM* room = nullptr);
+void NetWork_ResRoomOtherClientEnter(SESSION* session, BYTE result, SESSION* enteredSession);
+void NetWork_ResRoomChatting(SESSION* session, CMessage* message);
 
 // 패킷 생성 함수
 void MakePacket_ResLogin(st_PACKET_HEADER* pHeader, CMessage* message, BYTE result, DWORD ID);
 void MakePacket_ResRoomList(st_PACKET_HEADER* pHeader, CMessage* message);
+void MakePacket_ResRoomCreate(st_PACKET_HEADER* pHeader, CMessage* message, BYTE result, ROOM* pRoom);
+void MakePacket_ResRoomEnter(st_PACKET_HEADER* pHeader, CMessage* message, BYTE result, ROOM* pRoom);
+void MakePacket_ResRoomOtherClientEnter(st_PACKET_HEADER* pHeader, CMessage* message, SESSION* session);
+void MakePacket_ResChatting(st_PACKET_HEADER* pHeader, CMessage* message, SESSION* session, CMessage* text);
 
 // 중복 닉네임 검사
 bool CheckNickName(WCHAR* nick);
+
+// 중복 방제목 검사
+bool CheckTitle(WCHAR* title);
 
 // 체크섬 생성
 BYTE MakeCheckSum(CMessage* message, WORD dwType);
@@ -80,9 +95,11 @@ BYTE MakeCheckSum(CMessage* message, WORD dwType);
 // 유니캐스트 Send
 void SendPacket_Unicast(st_SESSION*, st_PACKET_HEADER* ,CMessage*);
 // 특정 세션을 제외한 브로드 캐스트
-void SendPacket_Broadcast(st_SESSION*, CMessage*);
+void SendPacket_Broadcast(st_PACKET_HEADER*, CMessage*);
 
 SESSION* FindSession(DWORD UserID);
+
+ROOM* FindRoom(DWORD RoomID);
 
 // 로그 파일 초기화 함수
 void InitialLogFile();
@@ -360,16 +377,9 @@ void NetWork_Recv(DWORD UserID)
 		return;
 	}
 
-	//iEnqueueSize = pSession->RecvQ.Enqueue(buffer, iResult);
 
 	if (iResult > 0)
 	{
-		//if (iResult != iEnqueueSize)
-		//{
-		//	PrintError(L"FatalError EnQueue");
-		//	exit(1);
-		//}
-
 		while (true)
 		{
 			iResult = CompletePacket(pSession);
@@ -478,6 +488,9 @@ int CompletePacket(SESSION* session)
 	return 0;
 }
 
+//////////////////////////////////////////////////////
+// 패킷 처리 함수
+//////////////////////////////////////////////////////
 bool PacketProc(SESSION* session, WORD dwType, CMessage* message)
 {
 	wprintf(L"Packet Info UserID : %d, Message Type : %d\n", session->ID, dwType);
@@ -491,8 +504,14 @@ bool PacketProc(SESSION* session, WORD dwType, CMessage* message)
 		return NetWork_ReqRoomList(session, message);
 		break;
 	case df_REQ_ROOM_CREATE:
-		return;
+		return NetWork_ReqRoomCreate(session, message);
 		break;
+	case df_REQ_ROOM_ENTER:
+		return NetWork_ReqRoomEnter(session, message);
+		break;
+	case df_REQ_CHAT:
+		return NetWork_ReqChatting(session, message);
+			break;
 	default:
 		break;
 	}
@@ -539,6 +558,89 @@ bool NetWork_ReqRoomList(SESSION* session, CMessage* message)
 	return true;
 }
 
+bool NetWork_ReqRoomCreate(SESSION* session, CMessage* message)
+{
+	WCHAR szRoomTitle[256] = { 0 };
+	WORD wTitleSize = 0;
+
+	ROOM* pRoom = nullptr;
+
+	(*message) >> wTitleSize;
+	message->GetData((char*)szRoomTitle, wTitleSize);
+
+	if (wTitleSize > 256 || wTitleSize == 0)
+	{
+		NetWork_ResRoomCreate(session, df_RESULT_ROOM_CREATE_ETC);
+		return true;
+	}
+
+	if (CheckTitle(szRoomTitle))
+	{
+		NetWork_ResRoomCreate(session, df_RESULT_ROOM_CREATE_DNICK);
+		return true;
+	}
+
+	pRoom = new ROOM;
+
+	pRoom->ID = g_iRoomID++;
+	wcscpy_s(pRoom->Title, szRoomTitle);
+	
+	g_Room_List.insert(std::make_pair(pRoom->ID, pRoom));
+
+	// 방생성 로그
+	wprintf(L" 방 생성. UserID : %d, RoomTitle : %s, RoomID : %d, RoomCount : %d\n", session->ID, pRoom->Title, pRoom->ID, g_Room_List.size());
+
+	NetWork_ResRoomCreate(session, df_RESULT_ROOM_CREATE_OK, pRoom);
+	return true;
+}
+
+bool NetWork_ReqRoomEnter(SESSION* session, CMessage* message)
+{
+	ROOM* pRoom = nullptr;
+	DWORD RoomID = 0;
+	(*message) >> RoomID;
+
+	SESSION* pClient = FindSession(session->ID);
+	if (pClient == nullptr)
+		Disconnect(session->ID);
+	else
+	{
+		pRoom = FindRoom(RoomID);
+		if (pRoom == nullptr)
+		{
+			// 방 ID오류
+			NetWork_ResRoomEnter(session, df_RESULT_ROOM_ENTER_NOT);
+			return true;
+		}
+	}
+	// 입장한 클라이언트에게 결과를 전송하기 전에 기존에 방에 있던 클라이언트들에게 새로운 클라이언트의 접속을 알린다.
+	for (std::map<int, SESSION*>::iterator itor = pRoom->userList.begin(); itor != pRoom->userList.end(); itor++)
+	{
+		NetWork_ResRoomOtherClientEnter(itor->second, df_RES_USER_ENTER, pClient);
+	}
+	// 방입장 로그
+	wprintf(L" 방 입장. UserID : %d, RoomTitle : %s, RoomID : %d, UserCount : %d\n", session->ID, pRoom->Title, pRoom->ID, pRoom->userList.size());
+	NetWork_ResRoomEnter(session, df_RESULT_ROOM_ENTER_OK, pRoom);
+	pRoom->userList.insert(std::make_pair(session->ID, session));
+	pClient->RoomID = RoomID;
+	NetWork_ResRoomOtherClientEnter(session, df_RES_USER_ENTER, session);
+	return true;
+}
+
+bool NetWork_ReqChatting(SESSION* session, CMessage* message)
+{
+	ROOM* pRoom = FindRoom(session->RoomID);
+	// 입장한 클라이언트에게 결과를 전송하기 전에 기존에 방에 있던 클라이언트들에게 새로운 클라이언트의 접속을 알린다.
+	for (std::map<int, SESSION*>::iterator itor = pRoom->userList.begin(); itor != pRoom->userList.end(); itor++)
+	{
+		if (itor->first == session->ID)
+			continue;
+		else
+			NetWork_ResRoomChatting(itor->second, message);
+	}
+	return true;
+}
+
 void NetWork_ResRoomList(SESSION* session)
 {
 	CMessage packet;
@@ -546,6 +648,55 @@ void NetWork_ResRoomList(SESSION* session)
 
 	MakePacket_ResRoomList(&header, &packet);
 
+	SendPacket_Unicast(session, &header, &packet);
+}
+
+void NetWork_ResRoomCreate(SESSION* session, BYTE result, ROOM* room)
+{
+	CMessage packet;
+	st_PACKET_HEADER header;
+
+	MakePacket_ResRoomCreate(&header, &packet, result, room);
+
+	if (result == df_RESULT_ROOM_CREATE_OK)
+	{
+		SendPacket_Broadcast(&header, &packet);
+	}
+	else
+	{
+		SendPacket_Unicast(session, &header, &packet);
+	}
+}
+
+void NetWork_ResRoomEnter(SESSION* session, BYTE result, ROOM* room)
+{
+	st_PACKET_HEADER header;
+	CMessage packet;
+
+	MakePacket_ResRoomEnter(&header, &packet, result, room);
+	
+	if (result == df_RESULT_ROOM_ENTER_OK)
+	{
+		SendPacket_Unicast(session, &header, &packet);
+	}
+}
+
+void NetWork_ResRoomOtherClientEnter(SESSION* session, BYTE result, SESSION* enteredSession)
+{
+	CMessage packet;
+	st_PACKET_HEADER header;
+	MakePacket_ResRoomOtherClientEnter(&header, &packet, enteredSession);
+
+	SendPacket_Unicast(session, &header, &packet);
+}
+
+void NetWork_ResRoomChatting(SESSION* session, CMessage* message)
+{
+	CMessage packet;
+	st_PACKET_HEADER header;
+	WORD textSize = 0;
+
+	MakePacket_ResChatting(&header, &packet, session, message);
 	SendPacket_Unicast(session, &header, &packet);
 }
 
@@ -588,11 +739,97 @@ void MakePacket_ResRoomList(st_PACKET_HEADER* pHeader, CMessage* message)
 	pHeader->wPayloadSize = message->GetDataSize();
 }
 
+void MakePacket_ResRoomCreate(st_PACKET_HEADER* pHeader, CMessage* message, BYTE result, ROOM* pRoom)
+{
+	WORD wTitleSize;
+
+	message->Clear();
+
+	if(result == df_RESULT_ROOM_CREATE_OK)
+	{
+		(*message) << result;
+		(*message) << pRoom->ID;
+		wTitleSize = wcslen(pRoom->Title) * sizeof(WCHAR);
+		(*message) << wTitleSize;
+		message->PutData((char*)pRoom->Title, wTitleSize);
+	}
+	pHeader->byCode = dfPACKET_CODE;
+	pHeader->byCheckSum = MakeCheckSum(message, df_RES_ROOM_CREATE);
+	pHeader->wMsgType = df_RES_ROOM_CREATE;
+	pHeader->wPayloadSize = message->GetDataSize();
+}
+
+void MakePacket_ResRoomEnter(st_PACKET_HEADER* pHeader, CMessage* message, BYTE result, ROOM* pRoom)
+{
+	WORD wTitleSize;
+	message->Clear();
+	(*message) << result;
+
+	if (result == df_RESULT_ROOM_ENTER_OK)
+	{
+		(*message) << pRoom->ID;
+		wTitleSize = wcslen(pRoom->Title) * sizeof(WCHAR);
+		(*message) << wTitleSize;
+		message->PutData((char*)pRoom->Title, wTitleSize);
+		(*message) << (BYTE)pRoom->userList.size();
+		for (std::map<int, SESSION*>::iterator itor = pRoom->userList.begin(); itor != pRoom->userList.end(); itor++)
+		{
+			message->PutData((char*)itor->second->NickName, sizeof(WCHAR) * 15);
+			(*message) << itor->second->ID;
+		}
+	}
+
+	pHeader->byCode = dfPACKET_CODE;
+	pHeader->byCheckSum = MakeCheckSum(message, df_RES_ROOM_ENTER);
+	pHeader->wMsgType = df_RES_ROOM_ENTER;
+	pHeader->wPayloadSize = message->GetDataSize();
+}
+
+void MakePacket_ResRoomOtherClientEnter(st_PACKET_HEADER* pHeader, CMessage* message, SESSION* session)
+{
+	message->PutData((char*)session->NickName, sizeof(WCHAR) * 15);
+	(*message) << session->ID;
+
+	pHeader->byCode = dfPACKET_CODE;
+	pHeader->byCheckSum = MakeCheckSum(message, df_RES_USER_ENTER);
+	pHeader->wMsgType = df_RES_USER_ENTER;
+	pHeader->wPayloadSize = message->GetDataSize();
+}
+
+void MakePacket_ResChatting(st_PACKET_HEADER* pHeader, CMessage* message, SESSION* session, CMessage* text)
+{
+	WORD szTextSize = 0;
+	(*text) >> szTextSize;
+	
+	
+	(*message) << session->ID;
+
+	(*message) << szTextSize;
+
+	message->PutData((char*)(text->GetFront()), szTextSize);
+
+	pHeader->byCode = dfPACKET_CODE;
+	pHeader->byCheckSum = MakeCheckSum(message, df_RES_CHAT);
+	pHeader->wMsgType = df_RES_CHAT;
+	pHeader->wPayloadSize = message->GetDataSize();
+
+}
+
 bool CheckNickName(WCHAR* nick)
 {
 	for (std::map<int, SESSION*>::iterator itor = g_Session_List.begin(); itor != g_Session_List.end(); itor++)
 	{
 		if (wcscmp(nick, (itor)->second->NickName) == 0)
+			return true;
+	}
+	return false;
+}
+
+bool CheckTitle(WCHAR* title)
+{
+	for (std::map<int, ROOM*>::iterator itor = g_Room_List.begin(); itor != g_Room_List.end(); itor++)
+	{
+		if (wcscmp(title, itor->second->Title) == 0)
 			return true;
 	}
 	return false;
@@ -624,10 +861,27 @@ void SendPacket_Unicast(st_SESSION* session, st_PACKET_HEADER* header, CMessage*
 	session->SendQ.Enqueue((char*)message->GetBufferPtr(), message->GetDataSize());
 }
 
+void SendPacket_Broadcast(st_PACKET_HEADER* pHeader, CMessage* message)
+{
+	SESSION* temp = nullptr;
+	for (std::map<int, SESSION*>::iterator itor = g_Session_List.begin(); itor != g_Session_List.end(); itor++)
+	{
+		temp = itor->second;
+		SendPacket_Unicast(temp, pHeader, message);
+	}
+}
+
 SESSION* FindSession(DWORD UserID)
 {
 	SESSION* pSession = nullptr;
 	pSession = g_Session_List.find(UserID)->second;
 	return pSession;
+}
+
+ROOM* FindRoom(DWORD RoomID)
+{
+	ROOM* pRoom = nullptr;
+	pRoom = g_Room_List.find(RoomID)->second;
+	return pRoom;
 }
 

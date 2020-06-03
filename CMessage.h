@@ -126,6 +126,7 @@ public:
 
 	void PutData(char* data, int size);
 
+	void GetData(char* data, int size);
 
 
 	//////////////////////////////////////////////////////////////////////////

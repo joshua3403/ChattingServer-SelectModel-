@@ -21,6 +21,23 @@ void CMessage::PutData(char* data, int size)
 	m_iRear += realSize;
 }
 
+void CMessage::GetData(char* data, int size)
+{
+	int realSize = GetDataSize() - size;
+	if (realSize < 0)
+	{
+		CExceptClass* Except = new CExceptClass(L">> SHORT ERROR", m_cpBuffer, m_iMaxSize);
+		throw Except;
+	}
+
+	realSize = size;
+	char* ptr = m_cpBuffer;
+	ptr += m_iFront;
+	memcpy(data, ptr, size);
+	m_iUsingSize -= size;
+	m_iFront += realSize;
+}
+
 void CMessage::IncreaseBufferSize(int size)
 {
 	int realSize = GetFreeSize() - size;
