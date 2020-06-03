@@ -59,12 +59,17 @@ int CompletePacket(SESSION* session);
 bool PacketProc(SESSION* session, WORD dwType, CMessage* message);
 
 // 패킷 대응 함수
-// 클라이언트의 로그인 요청
+// 클라이언트의 요청
 bool NetWork_ReqLogin(SESSION* session, CMessage* message);
+bool NetWork_ReqRoomList(SESSION* session, CMessage* message);
+
+// 서버의 응답
 void NetWork_ResLogin(SESSION* session, BYTE byResult);
+void NetWork_ResRoomList(SESSION* session);
 
 // 패킷 생성 함수
 void MakePacket_ResLogin(st_PACKET_HEADER* pHeader, CMessage* message, BYTE result, DWORD ID);
+void MakePacket_ResRoomList(st_PACKET_HEADER* pHeader, CMessage* message);
 
 // 중복 닉네임 검사
 bool CheckNickName(WCHAR* nick);
@@ -224,7 +229,7 @@ void NetWorkPart()
 	FD_ZERO(&readSet);
 	FD_ZERO(&writeSet);
 	memset(UserTable_NO, -1, sizeof(DWORD) * FD_SETSIZE);
-	memset(UserTable_Socket, INVALID_SOCKET, sizeof(DWORD) * FD_SETSIZE);
+	memset(UserTable_Socket, INVALID_SOCKET, sizeof(SOCKET) * FD_SETSIZE);
 
 	// 리슨 소켓 넣기
 	FD_SET(listen_sock, &readSet);
@@ -481,6 +486,13 @@ bool PacketProc(SESSION* session, WORD dwType, CMessage* message)
 	case df_REQ_LOGIN:
 		return NetWork_ReqLogin(session, message);
 			break;
+
+	case df_REQ_ROOM_LIST:
+		return NetWork_ReqRoomList(session, message);
+		break;
+	case df_REQ_ROOM_CREATE:
+		return;
+		break;
 	default:
 		break;
 	}
@@ -521,6 +533,24 @@ void NetWork_ResLogin(SESSION* session, BYTE byResult)
 	SendPacket_Unicast(session, &header, &packet);
 }
 
+bool NetWork_ReqRoomList(SESSION* session, CMessage* message)
+{
+	NetWork_ResRoomList(session);
+	return true;
+}
+
+void NetWork_ResRoomList(SESSION* session)
+{
+	CMessage packet;
+	st_PACKET_HEADER header;
+
+	MakePacket_ResRoomList(&header, &packet);
+
+	SendPacket_Unicast(session, &header, &packet);
+}
+
+
+
 void MakePacket_ResLogin(st_PACKET_HEADER* pHeader, CMessage* message, BYTE result, DWORD ID)
 {
 	(*message) << result;
@@ -530,6 +560,32 @@ void MakePacket_ResLogin(st_PACKET_HEADER* pHeader, CMessage* message, BYTE resu
 	pHeader->wMsgType = df_RES_LOGIN;
 	pHeader->wPayloadSize = message->GetDataSize();
 
+}
+
+void MakePacket_ResRoomList(st_PACKET_HEADER* pHeader, CMessage* message)
+{
+	WORD RoomCount = g_Room_List.size();
+	WORD titleSize = 0;
+	message->Clear();
+	(*message) << RoomCount;
+	for (std::map<int, ROOM*>::iterator itor = g_Room_List.begin(); itor != g_Room_List.end(); itor++)
+	{
+		(*message) << itor->second->ID;
+		titleSize = wcslen(itor->second->Title) * sizeof(WCHAR);
+		(*message) << titleSize;
+		message->PutData((char*)itor->second->Title, titleSize);
+		BYTE userCount = itor->second->userList.size();
+		(*message) << userCount;
+		for (std::map<int, SESSION*>::iterator itor2 = itor->second->userList.begin(); itor2 != itor->second->userList.end(); itor2++)
+		{
+			message->PutData((char*)itor2->second->NickName, 30);
+		}
+	}
+
+	pHeader->byCode = dfPACKET_CODE;
+	pHeader->byCheckSum = MakeCheckSum(message, df_RES_ROOM_LIST);
+	pHeader->wMsgType = df_RES_ROOM_LIST;
+	pHeader->wPayloadSize = message->GetDataSize();
 }
 
 bool CheckNickName(WCHAR* nick)

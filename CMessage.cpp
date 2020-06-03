@@ -1,6 +1,26 @@
 #include "stdafx.h"
 #include "CMessage.h"
 
+void CMessage::PutData(char* data, int size)
+{
+	int realSize = GetFreeSize() - size;
+	if (realSize < 0)
+	{
+		while (realSize < 0)
+		{
+			IncreaseBufferSize(eBUFFER_UPSCALE_BYTE);
+			realSize = GetFreeSize() - size;
+		}
+	}
+
+	realSize = size;
+	char* ptr = m_cpBuffer;
+	ptr += m_iRear;
+	memcpy(ptr, (char*)data, realSize);
+	m_iUsingSize += realSize;
+	m_iRear += realSize;
+}
+
 void CMessage::IncreaseBufferSize(int size)
 {
 	int realSize = GetFreeSize() - size;
