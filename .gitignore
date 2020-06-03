@@ -54,3 +54,4 @@ dkms.conf
 *.txt
 *.log
 .vs/ChattingServer(Select Model)/v16/ipch/a8d6433442a6d830.ipch
+*.ipch
